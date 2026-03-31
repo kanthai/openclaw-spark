@@ -1,0 +1,50 @@
+# Recipe: Qwen3.5-9B AxionML NVFP4 (Slot F)
+# ykarout/Qwen3.5-9b-nvfp4 — NVFP4 quantization, ~6GB weights
+# Small/fast worker agent — leaves headroom for slotE on GB10 (121GB unified)
+# Slot F — port 8009
+
+recipe_version: "1"
+name: Qwen3.5-9B-AxionML-NVFP4-SlotF
+description: vLLM serving AxionML Qwen3.5-9B-NVFP4 worker agent on port 8009
+
+model: ykarout/Qwen3.5-9b-nvfp4
+
+container: vllm-node
+
+mods:
+  - mods/fix-qwen3.5-chat-template
+
+defaults:
+  port: 8009
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.20
+  max_model_len: 32768
+  max_num_seqs: 8
+  max_num_batched_tokens: 16384
+
+env:
+  VLLM_USAGE_SOURCE: "production"
+  TORCH_MATMUL_PRECISION: "high"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+command: |
+  vllm serve ykarout/Qwen3.5-9b-nvfp4 \
+     --tensor-parallel-size {tensor_parallel} \
+     --max-model-len {max_model_len} \
+     --max-num-seqs {max_num_seqs} \
+     --gpu-memory-utilization {gpu_memory_utilization} \
+     --trust-remote-code \
+     --host {host} --port {port} \
+     --dtype auto \
+     --kv-cache-dtype fp8 \
+     --attention-backend flashinfer \
+     --enable-chunked-prefill \
+     --max-num-batched-tokens {max_num_batched_tokens} \
+     --load-format fastsafetensors \
+     --enable-prefix-caching \
+     --enable-auto-tool-choice \
+     --tool-call-parser qwen3_coder \
+     --reasoning-parser qwen3 \
+     --no-enable-flashinfer-autotune \
+     --chat-template unsloth.jinja

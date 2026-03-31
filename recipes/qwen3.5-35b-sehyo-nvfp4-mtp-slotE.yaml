@@ -1,0 +1,56 @@
+# Recipe: Qwen3.5-35B Sehyo NVFP4 + MTP (Slot E)
+# Sehyo/Qwen3.5-35B-A3B-NVFP4 — llm-compressor NVFP4, MTP weights in extra_weights.safetensors
+# ~24GB model weights, leaving ~79GB for KV cache on GB10 (121GB unified)
+# eugr/spark-vllm-docker vllm-node image — FlashInfer compiled for SM121, NVFP4 quant fix (PR38126).
+# Slot E — port 8007
+
+recipe_version: "1"
+name: Qwen3.5-35B-Sehyo-NVFP4-MTP-SlotE
+description: vLLM serving Sehyo Qwen3.5-35B-NVFP4 + MTP on port 8007
+
+model: Sehyo/Qwen3.5-35B-A3B-NVFP4
+
+container: vllm-node
+
+mods:
+  - mods/fix-qwen3.5-chat-template
+
+defaults:
+  port: 8007
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.60
+  max_model_len: 262144
+  max_num_seqs: 4
+  max_num_batched_tokens: 131072
+
+env:
+  VLLM_USAGE_SOURCE: "production"
+  TORCH_MATMUL_PRECISION: "high"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  VLLM_NVFP4_MOE_FORCE_MARLIN: 0
+  VLLM_USE_FLASHINFER_MOE_FP4: 0  # flashinfer issue #2776: illegal memory access on SM121 during CUDA graph capture
+
+command: |
+  vllm serve Sehyo/Qwen3.5-35B-A3B-NVFP4 \
+     --tensor-parallel-size {tensor_parallel} \
+     --max-model-len {max_model_len} \
+     --max-num-seqs {max_num_seqs} \
+     --gpu-memory-utilization {gpu_memory_utilization} \
+     --trust-remote-code \
+     --host {host} --port {port} \
+     --dtype auto \
+     --kv-cache-dtype fp8 \
+     --attention-backend flashinfer \
+     --enable-chunked-prefill \
+     --max-num-batched-tokens {max_num_batched_tokens} \
+     --load-format fastsafetensors \
+     --enable-prefix-caching \
+     --enable-auto-tool-choice \
+     --tool-call-parser qwen3_coder \
+     --reasoning-parser qwen3 \
+     --reasoning-config '{{"think_start_str": "<think>", "think_end_str": "I have to give the solution based on the thinking directly now.</think>"}}' \
+     --chat-template unsloth.jinja \
+     --default-chat-template-kwargs '{{"enable_thinking": false}}' \
+     --speculative-config '{{"method":"mtp","num_speculative_tokens":3}}' \
+     --limit-mm-per-prompt '{{"image": 5}}'

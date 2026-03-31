@@ -1,0 +1,17 @@
+[Unit]
+Description=vLLM Think Proxy (8017 → 8007)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=kanthai
+WorkingDirectory=/home/kanthai
+ExecStart=/usr/bin/python3 /home/kanthai/vllm-think-proxy.py --port 8017 --backend http://localhost:8007
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
