@@ -34,6 +34,45 @@ THINKING_BUDGETS = {
 }
 
 
+def normalize_usage_fields(usage: dict | None) -> dict | None:
+    """Add compatibility usage keys expected by different clients."""
+    if not isinstance(usage, dict):
+        return usage
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+
+    if input_tokens is None and isinstance(prompt, (int, float)):
+        input_tokens = int(prompt)
+        usage["input_tokens"] = input_tokens
+    if output_tokens is None and isinstance(completion, (int, float)):
+        output_tokens = int(completion)
+        usage["output_tokens"] = output_tokens
+    if total_tokens is None:
+        if isinstance(input_tokens, (int, float)) or isinstance(output_tokens, (int, float)):
+            usage["total_tokens"] = int(input_tokens or 0) + int(output_tokens or 0)
+
+    # Also expose OpenClaw-friendly fields.
+    if usage.get("input") is None and isinstance(usage.get("input_tokens"), (int, float)):
+        usage["input"] = int(usage["input_tokens"])
+    if usage.get("output") is None and isinstance(usage.get("output_tokens"), (int, float)):
+        usage["output"] = int(usage["output_tokens"])
+    if usage.get("total") is None and isinstance(usage.get("total_tokens"), (int, float)):
+        usage["total"] = int(usage["total_tokens"])
+    return usage
+
+
+def normalize_usage_payload(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        payload["usage"] = normalize_usage_fields(usage)
+    return payload
+
+
 def detect_and_strip_think(messages: list) -> tuple[list, str | None]:
     """Check last user message for /think [level] prefix.
     Returns (messages, level) where level is 'low'/'medium'/'high' or None."""
@@ -155,32 +194,49 @@ async def proxy_request(request: web.Request, backend: str) -> web.Response:
     async with ClientSession(timeout=ClientTimeout(total=300)) as session:
         async with session.post(url, json=body, headers=headers) as resp:
             if is_stream:
-                # Stream SSE response back, scanning for the final usage chunk
+                # Stream SSE response back, normalizing usage keys in usage chunks.
                 response = web.StreamResponse(
                     status=resp.status,
                     headers={k: v for k, v in resp.headers.items() if k.lower() not in ("transfer-encoding", "content-encoding")},
                 )
                 await response.prepare(request)
+                sse_buffer = ""
                 async for chunk in resp.content.iter_any():
-                    await response.write(chunk)
-                    # Scan for usage chunk: data: {...,"usage":{...}}
-                    try:
-                        for line in chunk.decode(errors="ignore").splitlines():
-                            if line.startswith("data:") and '"usage"' in line:
-                                data = json.loads(line[5:].strip())
-                                usage = data.get("usage") or {}
-                                if usage.get("prompt_tokens"):
-                                    log.info(
-                                        f"tokens prompt={usage['prompt_tokens']} "
-                                        f"completion={usage.get('completion_tokens', 0)} "
-                                        f"total={usage.get('total_tokens', 0)}"
-                                    )
-                    except Exception:
-                        pass
+                    sse_buffer += chunk.decode("utf-8", errors="ignore")
+                    while "\n" in sse_buffer:
+                        line, sse_buffer = sse_buffer.split("\n", 1)
+                        out_line = line
+                        if line.startswith("data:"):
+                            payload = line[5:].strip()
+                            if payload and payload != "[DONE]":
+                                try:
+                                    data = json.loads(payload)
+                                    normalize_usage_payload(data)
+                                    usage = data.get("usage") or {}
+                                    if usage.get("prompt_tokens") or usage.get("input_tokens"):
+                                        log.info(
+                                            f"tokens prompt={usage.get('prompt_tokens', usage.get('input_tokens', 0))} "
+                                            f"completion={usage.get('completion_tokens', usage.get('output_tokens', 0))} "
+                                            f"total={usage.get('total_tokens', usage.get('total', 0))}"
+                                        )
+                                    out_line = "data: " + json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+                                except Exception:
+                                    pass
+                        await response.write((out_line + "\n").encode("utf-8"))
+                if sse_buffer:
+                    await response.write(sse_buffer.encode("utf-8"))
                 await response.write_eof()
                 return response
             else:
                 body_out = await resp.read()
+                content_type = resp.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    try:
+                        payload = json.loads(body_out.decode("utf-8", errors="ignore"))
+                        normalize_usage_payload(payload)
+                        body_out = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    except Exception:
+                        pass
                 return web.Response(
                     status=resp.status,
                     headers={k: v for k, v in resp.headers.items() if k.lower() not in ("transfer-encoding", "content-encoding")},
