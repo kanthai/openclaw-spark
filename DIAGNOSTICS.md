@@ -4,6 +4,27 @@ Fast lookup for common issues. For full context, see [README.md](README.md).
 
 ---
 
+## Token counts not showing in clawmetry
+
+**Symptom:** All usage fields in session files are zero. Clawmetry shows 0 tokens.
+
+**Cause:** vLLM doesn't return token usage in streaming responses by default. OpenClaw never sees the counts.
+
+**Fix:** The `vllm-think-proxy.py` injects `stream_options: {include_usage: true}` into every streaming request. vLLM then appends a usage chunk before `[DONE]` and OpenClaw records it.
+
+Verify the proxy is injecting it:
+```bash
+curl -s http://localhost:8017/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Sehyo/Qwen3.5-35B-A3B-NVFP4","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":true}' \
+  | grep '"usage"'
+```
+Should return a line with `prompt_tokens`, `completion_tokens`, `total_tokens`.
+
+If the proxy is down: `systemctl --user restart vllm-think-proxy.service`
+
+---
+
 ## Is vLLM actually running with the right params?
 
 ```bash

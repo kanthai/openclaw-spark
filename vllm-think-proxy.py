@@ -144,13 +144,18 @@ async def proxy_request(request: web.Request, backend: str) -> web.Response:
         log.info(f"Thinking OFF (no prefix, effort={reasoning_effort})")
 
     is_stream = body.get("stream", False)
+
+    # Inject stream_options to get token usage back from vLLM
+    if is_stream:
+        body.setdefault("stream_options", {})["include_usage"] = True
+
     url = f"{backend}{path}"
     headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
 
     async with ClientSession(timeout=ClientTimeout(total=300)) as session:
         async with session.post(url, json=body, headers=headers) as resp:
             if is_stream:
-                # Stream SSE response back
+                # Stream SSE response back, scanning for the final usage chunk
                 response = web.StreamResponse(
                     status=resp.status,
                     headers={k: v for k, v in resp.headers.items() if k.lower() not in ("transfer-encoding", "content-encoding")},
@@ -158,6 +163,20 @@ async def proxy_request(request: web.Request, backend: str) -> web.Response:
                 await response.prepare(request)
                 async for chunk in resp.content.iter_any():
                     await response.write(chunk)
+                    # Scan for usage chunk: data: {...,"usage":{...}}
+                    try:
+                        for line in chunk.decode(errors="ignore").splitlines():
+                            if line.startswith("data:") and '"usage"' in line:
+                                data = json.loads(line[5:].strip())
+                                usage = data.get("usage") or {}
+                                if usage.get("prompt_tokens"):
+                                    log.info(
+                                        f"tokens prompt={usage['prompt_tokens']} "
+                                        f"completion={usage.get('completion_tokens', 0)} "
+                                        f"total={usage.get('total_tokens', 0)}"
+                                    )
+                    except Exception:
+                        pass
                 await response.write_eof()
                 return response
             else:
